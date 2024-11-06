@@ -39,15 +39,15 @@ class MonthlySoundVelocityGrid(SoundModel):
 class MonthlySoundVelocityGridOptimized(SoundModel):
     def __init__(self, paths, lat_bounds=None, lon_bounds=None, interpolate=False):
         self.models = [SoundVelocityGrid.create_from_NetCDF(p, lat_bounds, lon_bounds, interpolate) for p in paths]
+        self.h = HomogeneousSoundModel()
 
     def get_sound_travel_time(self, pos1, pos2, date):
         return self.models[date.month-1].get_sound_travel_time(pos1, pos2, date)
 
     def localize_common_source(self, sensors_positions, detection_times, x_min=-90, y_min=-180, x_max=90,
                              y_max=180, initial_pos=None):
-
         if initial_pos is None:
-            initial_pos = HomogeneousSoundModel().localize_common_source(sensors_positions, detection_times, x_min, y_min, x_max, y_max, initial_pos).x[1:]
+            initial_pos = self.h.localize_common_source(sensors_positions, detection_times, x_min, y_min, x_max, y_max, initial_pos).x[1:]
 
         reference_date = detection_times[0]  # to determine the part of the year concerned
         min_date = np.argmin(detection_times)
@@ -69,7 +69,7 @@ class MonthlySoundVelocityGridOptimized(SoundModel):
 
         try:
             x0 = [0, *(initial_pos)]
-            x0[0] = -self.get_sound_travel_time(x0[1:], sensors_positions[min_date], reference_date)
+            x0[0] = -self.h.get_sound_travel_time(x0[1:], sensors_positions[min_date], reference_date)
             res = least_squares(f, x0, bounds=([-np.inf, x_min, y_min], [0, x_max, y_max]))
         except:
             # absurd detection times can lead to an error during the least squares

@@ -5,7 +5,7 @@
 *.pickle
 *.npy
 data/*
-src/huge_dataset_project
+src/notebooks/huge_dataset_project
 
 *.png
 

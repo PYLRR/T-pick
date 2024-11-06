@@ -46,17 +46,17 @@ def get_embedder_similarities(d1, m1, d2, m2, max_shift=MAX_SHIFT, half_focus=HA
     return peaks, height
 
 
-def find_candidates(detection, d_h, tolerance, embedding_managers, min_p=MIN_P_MATES):
+def find_candidates(detection, d_h, tolerance, embedding_managers, min_p=MIN_P_MATES, agnostic=False):
     d1, s1 = detection[0], detection[-1]
     if s1 not in d_h:
         return {}
     candidates = {}
     for s2 in d_h.keys():
-        if s1 == s2:
+        if s1 == s2 or s2 not in embedding_managers:
             continue
 
-        d2 = d1 + d_h[s1][s2]
-        delta = tolerance
+        d2 = d1 + d_h[s1][s2] if not agnostic else d1
+        delta = tolerance if not agnostic else d_h[s1][s2] + tolerance
         max_delta = delta + datetime.timedelta(seconds=TIME_RES * (MAX_SHIFT + HALF_FOCUS_SIZE))
         if d2 + 2 * max_delta > embedding_managers[s2].dataset_end or d2 - 2 * max_delta < embedding_managers[
             s2].dataset_start or \
@@ -74,34 +74,7 @@ def find_candidates(detection, d_h, tolerance, embedding_managers, min_p=MIN_P_M
         candidates[s2] = np.array(candidates[s2])
     return candidates
 
-
-def best_matchup(scores, nb, d_h, tolerance):
-    scores_merged = []
-    for s in scores.keys():
-        for j, score in enumerate(scores[s]):
-            scores_merged.append((s, j, score[1]))
-
-    scores_merged.sort(key=lambda x: x[2])
-    selected = []
-    chosen_idxs = set()
-    idx = 0
-    while len(selected) != nb and idx < len(scores_merged):
-        s, j, similarity = scores_merged[idx]
-        if s not in chosen_idxs:
-            consistent = True
-            d = scores[s][j][0]
-            for (s2, j2) in selected:
-                d2 = scores[s2][j2][0]
-                if not (d + d_h[s][s2] - tolerance < d2 < d + d_h[s][s2] + tolerance):
-                    consistent = False  # given location constraint, this can't be true
-            if consistent:
-                selected.append((s, j))
-                chosen_idxs.add(s)
-        idx += 1
-    return selected
-
-
-def best_matchups_combinatory(scores, nb, d_h, tolerance, to_keep=3, min_dist=1):
+def best_matchups_combinatory(scores, nb, d_h, tolerance, to_keep=3, min_dist=1, agnostic=False):
     scores_val = [np.array(scores[s])[:, 1] for s in scores.keys()]
     best_stations = np.argsort([np.min(sc) for sc in scores_val])
     # now remove stations that are close in space
@@ -126,7 +99,9 @@ def best_matchups_combinatory(scores, nb, d_h, tolerance, to_keep=3, min_dist=1)
         consistent = True
         for s1_idx, (d1, p1, s1) in enumerate(matchup):
             for s2_idx, (d2, p2, s2) in enumerate(matchup[s1_idx + 1:]):
-                if not (d1 + d_h[s1][s2] - tolerance < d2 < d1 + d_h[s1][s2] + tolerance):
+                if not agnostic and not (d1 + d_h[s1][s2] - tolerance < d2 < d1 + d_h[s1][s2] + tolerance):
+                    consistent = False  # given location constraints, this can't be true
+                if agnostic and not (d1 - d_h[s1][s2] - tolerance < d2 < d1 + d_h[s1][s2] + tolerance):
                     consistent = False  # given location constraints, this can't be true
             score += p1
         if consistent:
@@ -146,7 +121,7 @@ def constrain_coord(coords):
 
     return coords
 
-def locate(matchup, sound_model, cost_allowed=None, initial_pos=None):
+def locate(matchup, sound_model, cost_allowed=None, initial_pos=None, max_var_t=20):
     det_times = [c[0] for c in matchup]
     det_pos = [c[-1].get_pos() for c in matchup]
     try:
@@ -155,7 +130,13 @@ def locate(matchup, sound_model, cost_allowed=None, initial_pos=None):
         return False, None
     if type(r) != list and np.count_nonzero(np.isnan(r.x))==0:
         r.x[1:] = constrain_coord(r.x[1:])
-        if r.x[1] is not None and (not cost_allowed or np.sqrt(r.cost/len(det_times)) < cost_allowed):
+        try:
+            J = r.jac
+            cov = np.linalg.inv(J.T.dot(J))
+            var = np.sqrt(np.diagonal(cov))
+        except:
+            var = [np.inf, np.inf, np.inf]
+        if r.x[1] is not None and (not cost_allowed or np.sqrt(r.cost/len(det_times)) < cost_allowed) and var[0]<max_var_t:
             return True, r
         else:
             return False, r

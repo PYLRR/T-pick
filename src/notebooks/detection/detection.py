@@ -15,6 +15,7 @@ import pickle
 import tensorflow as tf
 from line_profiler_pycharm import profile
 
+from utils.transformations.signal import butter_bandpass_filter
 from utils.data_reading.sound_data.station import StationsCatalog
 from utils.training.TiSSNet import TiSSNet_torch as TiSSNet
 from utils.training.embedder import Embedder, EmbedderSegmenter
@@ -27,7 +28,9 @@ if __name__=="__main__":
     embedder_checkpoint = "../../data/model_saves/embedder/torch_save_segmenter"
 
     # output files
-    DELTA = datetime.timedelta(seconds=3600 / 0.98)  # /0.98 to get 1h segments
+    OVERLAP = 0.02  # overlap for models application (no link with STFT)
+    DELTA = datetime.timedelta(seconds=3600 / (1-OVERLAP))  # / (1-OVERLAP) to get 1h segments
+    DELTA_SIGNAL = datetime.timedelta(seconds=5)  # duration considered to compute the energy of a signal
     TIME_RES = 500 / 936  # duration of each spectrogram pixel in seconds
     FREQ_RES = 240 / 256  # f of each spectrogram pixel in Hz
     TIME_RES_embedder = 0.5
@@ -35,8 +38,8 @@ if __name__=="__main__":
     MAX_F = 120  # max tolerated f, which means we discard some pixel lines in case of IMS
     REQ_WIDTH = int(DELTA.total_seconds() / TIME_RES)
     REQ_WIDTH_embedder = int(DELTA.total_seconds() / TIME_RES_embedder)
+    EMBEDDER = False
 
-    OVERLAP = 0.02  # overlap for models application (no link with STFT)
     STEP = (1 - OVERLAP) * DELTA
 
     TISSNET_PROMINENCE = 0.05
@@ -58,7 +61,6 @@ if __name__=="__main__":
     model_embedder.eval()
 
 
-    @profile
     def process_batch(batch):
         try:
             batch = np.array(batch)
@@ -72,7 +74,6 @@ if __name__=="__main__":
         return res
 
 
-    @profile
     def embed_batch(batch):
         try:
             batch = np.array(batch)
@@ -85,9 +86,8 @@ if __name__=="__main__":
         torch.cuda.empty_cache()
         return res
 
-    @profile
     def main():
-        for year in [2010]:
+        for year in [2022, 2019, 2017, 2016, 2015, 2014, 2013, 2011, 2010, 2009]:
             Path(f"../../data/detections/{year}/").mkdir(parents=True, exist_ok=True)
             print(f"Starting detection on year {year}")
             stations = stations_c.ends_after(datetime.datetime(year, 1, 1) - datetime.timedelta(days=1))
@@ -95,8 +95,9 @@ if __name__=="__main__":
             for station in stations:
                 if "MAHY" in station.name:
                     continue
-                embedding_path = f"../../data/detections/{year}/embedding_{year}_{station.name}-{station.date_start.year}"
-                Path(embedding_path).mkdir(parents=True, exist_ok=True)
+                if EMBEDDER:
+                    Path(embedding_path).mkdir(parents=True, exist_ok=True)
+                    embedding_path = f"../../data/detections/{year}/embedding_{year}_{station.name}-{station.date_start.year}"
                 results_file = f"../../data/detections/{year}/log_det_{year}_{station.name}-{station.date_start.year}.p"
 
                 print(f"Processing station {station.name}-{station.date_start.year}")
@@ -108,20 +109,33 @@ if __name__=="__main__":
                 stft_computer_embedder.overlap = 1 - TIME_RES_embedder * stft_computer.manager.sampling_f / stft_computer.nperseg
                 max_f_cut_line = round(MAX_F / FREQ_RES)
                 max_f_cut_line_embedder = round(MAX_F / FREQ_RES_embedder)
+                delta_signal = int(DELTA_SIGNAL.total_seconds() * stft_computer_embedder.manager.sampling_f)
 
                 start = max(datetime.datetime(year, 1, 1), station.date_start + datetime.timedelta(days=1))
                 end = min(datetime.datetime(year + 1, 1, 1), station.date_end - datetime.timedelta(days=1))
                 steps = math.ceil((end - start) / STEP)
                 start_idx = 0
-                batch_dates, batch_process, batch_process_embedder = [], [], []
+                batch_dates, batch_process, batch_process_embedder, batch_segment = [], [], [], []
 
-                existing_embedding_paths = glob2.glob(f"{embedding_path}/*.npy")
-                if len(existing_embedding_paths) > 0:
-                    last_date = np.max([datetime.datetime.strptime(p.split("/")[-1][:-4], "%Y%m%d_%H%M%S") for p in
-                                        existing_embedding_paths])
-                    del existing_embedding_paths
-                    print(f'Station {station.name} already processed up to {last_date.strftime("%Y%m%d_%H%M%S")}')
-                    start_idx = math.floor((last_date - start) / STEP)
+                if EMBEDDER:
+                    existing_embedding_paths = glob2.glob(f"{embedding_path}/*.npy")
+                    if len(existing_embedding_paths) > 0:
+                        last_date = np.max([datetime.datetime.strptime(p.split("/")[-1][:-4], "%Y%m%d_%H%M%S")
+                                            for p in existing_embedding_paths])
+                        del existing_embedding_paths
+                        print(f'Station {station.name} already processed up to {last_date.strftime("%Y%m%d_%H%M%S")}')
+                        start_idx = math.floor((last_date - start) / STEP)
+                else:
+                    already_done = []
+                    if Path(results_file).exists():
+                        with open(results_file, "rb") as f:
+                            while True:
+                                try:
+                                    already_done.append(pickle.load(f))
+                                except EOFError:
+                                    break
+                        last_date = already_done[-1][0]
+                        start_idx = math.floor((last_date - start) / STEP)
 
                 for i in tqdm(range(steps), smoothing=0.001):
                     if i < start_idx:
@@ -137,14 +151,15 @@ if __name__=="__main__":
                     data = (data[np.newaxis, :, :] / 255).astype(np.float32)
                     data_reduce = stft_computer_embedder._get_features(data_raw)[-1][:max_f_cut_line_embedder]
                     data_reduce = 2 * (data_reduce[np.newaxis, :, :] / 255 - 0.5).astype(np.float32)
-                    del data_raw  # reclaim some RAM
                     if REQ_WIDTH * 1.02 > data.shape[
                         -1] > REQ_WIDTH * 0.98:  # we resize it to a standard number of time steps
                         data = Resize((128, REQ_WIDTH))(torch.from_numpy(data)).numpy()
                         data_reduce = Resize((64, REQ_WIDTH_embedder))(torch.from_numpy(data_reduce)).numpy()
                     batch_dates.append(seg_start)
+                    batch_segment.append(data_raw)
                     batch_process.append(data)
-                    batch_process_embedder.append(data_reduce)
+                    if EMBEDDER:
+                        batch_process_embedder.append(data_reduce)
 
                     if len(batch_process) == batch_size:
                         if batch_process[-1].shape != batch_process[0].shape or batch_process[-2].shape != batch_process[
@@ -156,11 +171,12 @@ if __name__=="__main__":
                             res = list(rfirst) + [rlastlast] + [rlast]
                             del batch_process  # reclaim some RAM
 
-                            rlastlast_embedder = embed_batch(batch_process_embedder[-2])
-                            rlast_embedder = embed_batch(batch_process_embedder[-1])
-                            rfirst_embedder = embed_batch(batch_process_embedder[:-2])
-                            res_embedder = list(rfirst_embedder) + [rlastlast_embedder] + [rlast_embedder]
-                            del batch_process_embedder  # reclaim some RAM
+                            if EMBEDDER:
+                                rlastlast_embedder = embed_batch(batch_process_embedder[-2])
+                                rlast_embedder = embed_batch(batch_process_embedder[-1])
+                                rfirst_embedder = embed_batch(batch_process_embedder[:-2])
+                                res_embedder = list(rfirst_embedder) + [rlastlast_embedder] + [rlast_embedder]
+                                del batch_process_embedder  # reclaim some RAM
                         elif batch_process[0].shape != batch_process[1].shape or batch_process[1].shape != batch_process[
                             2].shape:
                             # first (and probably the one before because of overlaps) batch has a first element shorter than the others, we make three batches
@@ -170,23 +186,26 @@ if __name__=="__main__":
                             res = [rfirst] + [rsecond] + list(rrest)
                             del batch_process  # reclaim some RAM
 
-                            rfirst_embedder = embed_batch(batch_process_embedder[0])
-                            rsecond_embedder = embed_batch(batch_process_embedder[1])
-                            rrest_embedder = embed_batch(batch_process_embedder[2:])
-                            res_embedder = [rfirst_embedder] + [rsecond_embedder] + list(rrest_embedder)
-                            del batch_process_embedder  # reclaim some RAM
+                            if EMBEDDER:
+                                rfirst_embedder = embed_batch(batch_process_embedder[0])
+                                rsecond_embedder = embed_batch(batch_process_embedder[1])
+                                rrest_embedder = embed_batch(batch_process_embedder[2:])
+                                res_embedder = [rfirst_embedder] + [rsecond_embedder] + list(rrest_embedder)
+                                del batch_process_embedder  # reclaim some RAM
                         else:
                             res = process_batch(batch_process)
                             del batch_process  # reclaim some RAM
-                            res_embedder = embed_batch(batch_process_embedder)
-                            del batch_process_embedder  # reclaim some RAM
+                            if EMBEDDER:
+                                res_embedder = embed_batch(batch_process_embedder)
+                                del batch_process_embedder  # reclaim some RAM
 
                         for i, (seg_start, r) in enumerate(zip(batch_dates, res)):
-                            res_embedder_ = res_embedder[i].astype(np.float16)
-                            res_embedder_ = res_embedder_[:, int(res_embedder_.shape[1] * OVERLAP / 2):-int(
-                                res_embedder_.shape[1] * OVERLAP / 2)]
-                            np.save(f'{embedding_path}/{(seg_start + DELTA * OVERLAP / 2).strftime("%Y%m%d_%H%M%S")}.npy',
-                                    res_embedder_)
+                            if EMBEDDER:
+                                res_embedder_ = res_embedder[i].astype(np.float16)
+                                res_embedder_ = res_embedder_[:, int(res_embedder_.shape[1] * OVERLAP / 2):-int(
+                                    res_embedder_.shape[1] * OVERLAP / 2)]
+                                np.save(f'{embedding_path}/{(seg_start + DELTA * OVERLAP / 2).strftime("%Y%m%d_%H%M%S")}.npy',
+                                        res_embedder_)
                             peaks = find_peaks(r, height=0, distance=ALLOWED_ERROR_S / TIME_RES,
                                                prominence=TISSNET_PROMINENCE)
                             time_s = peaks[0] * TIME_RES
@@ -194,10 +213,15 @@ if __name__=="__main__":
                                      in range(len(time_s)) if
                                      peaks[1]["peak_heights"][j] > MIN_HEIGHT and peaks[0][j] > REQ_WIDTH * OVERLAP / 2 and
                                      peaks[0][j] < REQ_WIDTH * (1 - OVERLAP / 2)]
+                            # filter between 5 and 60 Hz to get rid of noise
+                            batch_segment[i] = butter_bandpass_filter(batch_segment[i], 5, 60, stft_computer.manager.sampling_f)
+                            LTA = np.sqrt(np.mean(batch_segment[i]**2))
+                            STA = [int((d-seg_start).total_seconds()*stft_computer.manager.sampling_f) for (d, _) in peaks]
+                            STA = [np.sqrt(np.mean(batch_segment[i][d-delta_signal:d+delta_signal]**2)) for d in STA]
 
                             with open(results_file, "ab") as f:
                                 for i, (d, p) in enumerate(peaks):
-                                    pickle.dump([d, p.astype(np.float16)], f)
+                                    pickle.dump([d, p.astype(np.float16), STA[i], LTA], f)
 
-                        batch_dates, batch_process, batch_process_embedder = [], [], []
+                        batch_dates, batch_process, batch_process_embedder, batch_segment = [], [], [], []
     main()

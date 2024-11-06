@@ -143,7 +143,7 @@ if __name__ == "__main__":
     sound_model_h = HomogeneousSoundModel()
     sound_model_g = MonthlySoundVelocityGridOptimized(
         [f"../../data/sound_model/min-velocities_month-{i:02d}.nc" for i in range(1, 13)], interpolate=True)
-    bathy_model = BathymetryGrid.create_from_NetCDF("../../data/geo/GEBCO_2023_sub_ice_topo.nc", lat_bounds=[-75, 35],
+    bathy_model = BathymetryGrid.create_from_NetCDF("../../../data/geo/GEBCO_2023_sub_ice_topo.nc", lat_bounds=[-75, 35],
                                                     lon_bounds=[-20, 180])
     stations_c = StationsCatalog(datasets_yaml).filter_out_undated().filter_out_unlocated()
     year = 2018

@@ -110,13 +110,15 @@ class STFTFeaturesExtractor(FeaturesExtractor):
         self.cmap = cmap
         self.axis_labels = axis_labels
 
-    def _get_features(self, data, normalize=False):
+    def _get_features(self, data, normalize=False, sf=None):
         """ Get the features given raw datapoints. Perform a STFT according to the selected parameters.
         :param data: Data a a time series of pressure.
+        :param fs: Sampling frequency of the data. Not needed if manager is defined.
         :return: The spectrogram along with its frequency and time bins values.
         """
         # compute spectrogram
-        f, t, spectro = signal.spectrogram(data, fs=self.manager.sampling_f, nperseg=self.nperseg,
+        sf = sf if sf is not None else self.manager.sampling_f
+        f, t, spectro = signal.spectrogram(data, fs=sf, nperseg=self.nperseg,
                                            noverlap=int(self.nperseg * self.overlap), window=self.window)
         if self.apply_log:  # compute log-spectrogram
             spectro = 10 * np.log10(spectro + 1e-20)
